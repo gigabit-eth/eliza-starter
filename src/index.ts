@@ -31,7 +31,8 @@ import readline from "readline";
 import yargs from "yargs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { character } from "./character.ts";
+import { character } from "./character";
+import { handleUserInput, setupApiEndpoints } from "./broadcast.js";
 import type { DirectClient } from "@ai16z/client-direct";
 
 const __filename = fileURLToPath(import.meta.url); // get the resolved path to the file
@@ -267,7 +268,7 @@ async function startAgent(character: Character, directClient: DirectClient) {
 
     directClient.registerAgent(runtime);
 
-    return clients;
+    return { clients, runtime };
   } catch (error) {
     elizaLogger.error(
       `Error starting agent for character ${character.name}:`,
@@ -284,32 +285,49 @@ const startAgents = async () => {
 
   let charactersArg = args.characters || args.character;
 
-  let characters = [character];
+  let characters = [];
   console.log("charactersArg", charactersArg);
   if (charactersArg) {
     characters = await loadCharacters(charactersArg);
+  } else {
+    characters = [defaultCharacter];
   }
-  console.log("characters", characters);
+  let activeAgents = [];
   try {
     for (const character of characters) {
-      await startAgent(character, directClient as DirectClient);
+      const agent = await startAgent(character, directClient as DirectClient);
+      activeAgents.push({
+        character,
+        ...agent,
+      });
     }
+
+    // Setup API endpoints after agents are initialized
+    await setupApiEndpoints(activeAgents[0].runtime, activeAgents[0].clients);
+
+    // Use the first agent's clients for the chat interface
+    const primaryAgent = activeAgents[0];
+
+    function chat() {
+      const agentId = characters[0].name ?? "Agent";
+      rl.question("You: ", async (input) => {
+        await handleUserInput(
+          input,
+          agentId,
+          primaryAgent.runtime,
+          primaryAgent.clients
+        );
+        if (input.toLowerCase() !== "exit") {
+          chat();
+        }
+      });
+    }
+
+    elizaLogger.log("Chat started. Type 'exit' to quit.");
+    chat();
   } catch (error) {
     elizaLogger.error("Error starting agents:", error);
   }
-
-  function chat() {
-    const agentId = characters[0].name ?? "Agent";
-    rl.question("You: ", async (input) => {
-      await handleUserInput(input, agentId);
-      if (input.toLowerCase() !== "exit") {
-        chat(); // Loop back to ask another question
-      }
-    });
-  }
-
-  elizaLogger.log("Chat started. Type 'exit' to quit.");
-  chat();
 };
 
 startAgents().catch((error) => {
@@ -326,33 +344,3 @@ rl.on("SIGINT", () => {
   rl.close();
   process.exit(0);
 });
-
-async function handleUserInput(input, agentId) {
-  if (input.toLowerCase() === "exit") {
-    rl.close();
-    process.exit(0);
-    return;
-  }
-
-  try {
-    const serverPort = parseInt(settings.SERVER_PORT || "3000");
-
-    const response = await fetch(
-      `http://localhost:${serverPort}/${agentId}/message`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: input,
-          userId: "user",
-          userName: "User",
-        }),
-      }
-    );
-
-    const data = await response.json();
-    data.forEach((message) => console.log(`${"Agent"}: ${message.text}`));
-  } catch (error) {
-    console.error("Error fetching response:", error);
-  }
-}
